@@ -1,4 +1,4 @@
 """Allow running as: python -m polymarket_bot"""
-from .cli import main
+from polymarket_bot.cli import main
 
 main()

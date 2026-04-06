@@ -9,8 +9,7 @@ from typing import Any
 
 import requests
 
-from .config import BotConfig
-from .models import Market, PricePoint
+from polymarket_bot.core import BotConfig, Market, PricePoint
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +59,9 @@ class PolymarketClient:
                 time.sleep(0.75 * (attempt + 1))
         raise last_error  # type: ignore[misc]
 
-    # --- Market parsing ---
-
     @staticmethod
     def _parse_end_time(raw: dict[str, Any]) -> datetime:
-        for key in ("endDate", "endTime", "end_date_iso", "end_time",
-                     "endDateIso"):
+        for key in ("endDate", "endTime", "end_date_iso", "end_time", "endDateIso"):
             val = raw.get(key)
             if not val:
                 continue
@@ -80,13 +76,9 @@ class PolymarketClient:
 
     @staticmethod
     def _get_token_ids(raw: dict[str, Any]) -> tuple[str, str]:
-        """Extract YES/NO token IDs from clobTokenIds or tokens array."""
-        # clobTokenIds is the canonical field: [yes_id, no_id]
         clob_ids = raw.get("clobTokenIds") or []
         if isinstance(clob_ids, list) and len(clob_ids) >= 2:
             return str(clob_ids[0]), str(clob_ids[1])
-
-        # Fallback: tokens array
         tokens = raw.get("tokens") or []
         yes_id, no_id = "", ""
         for token in tokens:
@@ -115,7 +107,6 @@ class PolymarketClient:
         volume = float(raw.get("volumeNum") or raw.get("volume") or 0)
         volume_24h = float(raw.get("volume24hr") or 0)
 
-        # Parse outcome prices
         outcome_prices = raw.get("outcomePrices") or []
         best_bid = 0.0
         best_ask = 0.0
@@ -128,7 +119,6 @@ class PolymarketClient:
 
         spread = float(raw.get("spread") or 0)
 
-        # Category: try events[0].slug first, then groupItemTitle
         category = "uncategorized"
         events = raw.get("events") or []
         if events and isinstance(events, list):
@@ -153,48 +143,32 @@ class PolymarketClient:
             neg_risk=bool(raw.get("negRisk", False)),
         )
 
-    # --- Paginated market fetch ---
-
     def fetch_open_markets(self) -> list[Market]:
-        """Fetch all open markets using cursor-based pagination."""
         all_markets: list[Market] = []
         offset = 0
         page_size = 500
-
         while True:
-            params = {
-                "closed": "false",
-                "active": "true",
-                "limit": str(page_size),
-                "offset": str(offset),
-            }
+            params = {"closed": "false", "active": "true",
+                      "limit": str(page_size), "offset": str(offset)}
             try:
-                payload = self._get(f"{self.cfg.gamma_base_url}/markets",
-                                    params=params)
+                payload = self._get(f"{self.cfg.gamma_base_url}/markets", params=params)
             except Exception as exc:
                 logger.error("Failed to fetch markets at offset %d: %s", offset, exc)
                 break
-
             rows = payload if isinstance(payload, list) else payload.get("data", [])
             if not rows:
                 break
-
             for raw in rows:
                 market = self._parse_market(raw)
                 if market:
                     all_markets.append(market)
-
             if len(rows) < page_size:
                 break
             offset += page_size
-
         logger.info("Fetched %d open markets total", len(all_markets))
         return all_markets
 
-    # --- Price endpoints ---
-
     def fetch_price(self, token_id: str) -> float:
-        """Get midpoint price for a token."""
         try:
             payload = self._get(f"{self.cfg.clob_base_url}/midpoint",
                                 params={"token_id": token_id})
@@ -205,22 +179,14 @@ class PolymarketClient:
             return 0.0
 
     def fetch_market_prices(self, market: Market) -> PricePoint:
-        """Fetch YES/NO prices for a market. Uses outcomePrices if available
-        to reduce API calls, falls back to individual midpoint calls."""
         ts = datetime.now(timezone.utc)
         yes_price = self.fetch_price(market.yes_token_id)
         no_price = self.fetch_price(market.no_token_id)
         spread = abs(yes_price + no_price - 1.0) if (yes_price and no_price) else 0.0
-        return PricePoint(
-            ts=ts,
-            yes=yes_price,
-            no=no_price,
-            spread=spread,
-            volume_at_snapshot=market.volume_usd,
-        )
+        return PricePoint(ts=ts, yes=yes_price, no=no_price, spread=spread,
+                          volume_at_snapshot=market.volume_usd)
 
     def fetch_orderbook(self, token_id: str) -> dict[str, Any]:
-        """Fetch order book for depth analysis."""
         try:
             payload = self._get(f"{self.cfg.clob_base_url}/book",
                                 params={"token_id": token_id})

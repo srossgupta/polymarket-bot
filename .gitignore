@@ -6,9 +6,10 @@ dist/
 build/
 .eggs/
 *.egg
-data/
+/data/
 .DS_Store
 *.db
 .env
 .venv/
 venv/
+.pytest_cache/

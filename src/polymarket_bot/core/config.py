@@ -9,7 +9,7 @@ from datetime import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(PROJECT_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 

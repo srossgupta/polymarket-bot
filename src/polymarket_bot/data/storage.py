@@ -6,12 +6,11 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Generator
 
-from .config import DB_PATH
-from .models import Market, PerformanceSnapshot, PricePoint, TradeEvent
+from polymarket_bot.core.config import DB_PATH
+from polymarket_bot.core.models import Market, PerformanceSnapshot, PricePoint, TradeEvent
 
 _local = threading.local()
 
@@ -120,8 +119,6 @@ def init_db() -> None:
     _get_conn()
 
 
-# --- Trade storage ---
-
 def append_trade(event: TradeEvent) -> None:
     with _cursor() as cur:
         cur.execute(
@@ -134,8 +131,7 @@ def append_trade(event: TradeEvent) -> None:
              event.event_type, event.ts.isoformat(), event.price, event.size_dollars,
              event.shares, event.pnl, event.reason, event.entry_price,
              event.hold_duration_seconds, event.peak_price, event.volume_at_entry,
-             event.velocity_at_entry, event.volatility_at_entry),
-        )
+             event.velocity_at_entry, event.volatility_at_entry))
 
 
 def load_trade_events(limit: int = 5000) -> list[dict[str, Any]]:
@@ -164,8 +160,6 @@ def load_trades_by_category() -> dict[str, list[dict]]:
     return result
 
 
-# --- Snapshot storage ---
-
 def append_snapshot(market: Market, point: PricePoint) -> None:
     with _cursor() as cur:
         cur.execute(
@@ -174,21 +168,17 @@ def append_snapshot(market: Market, point: PricePoint) -> None:
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (market.market_id, market.question, market.category,
              market.end_time.isoformat(), point.ts.isoformat(),
-             point.yes, point.no, point.spread, point.volume_at_snapshot),
-        )
+             point.yes, point.no, point.spread, point.volume_at_snapshot))
 
 
 def load_snapshots(market_id: str | None = None, limit: int = 50000) -> list[dict]:
     with _cursor() as cur:
         if market_id:
-            cur.execute("SELECT * FROM snapshots WHERE market_id=? ORDER BY ts LIMIT ?",
-                        (market_id, limit))
+            cur.execute("SELECT * FROM snapshots WHERE market_id=? ORDER BY ts LIMIT ?", (market_id, limit))
         else:
             cur.execute("SELECT * FROM snapshots ORDER BY ts LIMIT ?", (limit,))
         return [dict(r) for r in cur.fetchall()]
 
-
-# --- Watchlist ---
 
 def save_watchlist(markets: list[Market], scan_ts: datetime | None = None) -> None:
     ts = (scan_ts or datetime.now(timezone.utc)).isoformat()
@@ -199,11 +189,8 @@ def save_watchlist(markets: list[Market], scan_ts: datetime | None = None) -> No
                    volume_usd, category, yes_token_id, no_token_id)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 (ts, m.market_id, m.question, m.end_time.isoformat(),
-                 m.volume_usd, m.category, m.yes_token_id, m.no_token_id),
-            )
+                 m.volume_usd, m.category, m.yes_token_id, m.no_token_id))
 
-
-# --- Metrics ---
 
 def append_metrics(metrics: dict) -> None:
     with _cursor() as cur:
@@ -217,8 +204,6 @@ def load_metrics(limit: int = 500) -> list[dict]:
         return [{"ts": r["ts"], **json.loads(r["payload"])} for r in cur.fetchall()]
 
 
-# --- Performance snapshots ---
-
 def save_performance(snap: PerformanceSnapshot) -> None:
     with _cursor() as cur:
         cur.execute(
@@ -230,8 +215,7 @@ def save_performance(snap: PerformanceSnapshot) -> None:
             (snap.ts.isoformat(), snap.cash, snap.positions_value, snap.total_value,
              snap.open_positions, snap.total_trades, snap.wins, snap.losses,
              snap.total_pnl, snap.win_rate, snap.avg_win, snap.avg_loss,
-             snap.sharpe_estimate, snap.expectancy, snap.best_category, snap.worst_category),
-        )
+             snap.sharpe_estimate, snap.expectancy, snap.best_category, snap.worst_category))
 
 
 def load_performance_history(limit: int = 200) -> list[dict]:
@@ -240,58 +224,37 @@ def load_performance_history(limit: int = 200) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
-# --- Analytics queries ---
-
 def get_pnl_by_parameter_set() -> list[dict]:
-    """Group trades by the entry_price bucket to analyze parameter sensitivity."""
     with _cursor() as cur:
         cur.execute("""
-            SELECT
-                ROUND(entry_price * 100) as entry_cents,
-                COUNT(*) as trades,
+            SELECT ROUND(entry_price * 100) as entry_cents, COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                ROUND(SUM(pnl), 2) as total_pnl,
-                ROUND(AVG(pnl), 2) as avg_pnl,
+                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl,
                 ROUND(AVG(hold_duration_seconds), 1) as avg_hold_secs
-            FROM trades
-            WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
-            GROUP BY ROUND(entry_price * 100)
-            ORDER BY entry_cents
-        """)
+            FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
+            GROUP BY ROUND(entry_price * 100) ORDER BY entry_cents""")
         return [dict(r) for r in cur.fetchall()]
 
 
 def get_category_performance() -> list[dict]:
     with _cursor() as cur:
         cur.execute("""
-            SELECT
-                category,
-                COUNT(*) as trades,
+            SELECT category, COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                ROUND(SUM(pnl), 2) as total_pnl,
-                ROUND(AVG(pnl), 2) as avg_pnl,
+                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl,
                 ROUND(AVG(CASE WHEN pnl > 0 THEN pnl END), 2) as avg_win,
                 ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END), 2) as avg_loss
-            FROM trades
-            WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
-            GROUP BY category
-            ORDER BY total_pnl DESC
-        """)
+            FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
+            GROUP BY category ORDER BY total_pnl DESC""")
         return [dict(r) for r in cur.fetchall()]
 
 
 def get_hourly_pnl() -> list[dict]:
-    """P&L bucketed by hour-of-day to find best trading windows."""
     with _cursor() as cur:
         cur.execute("""
-            SELECT
-                CAST(SUBSTR(ts, 12, 2) AS INTEGER) as hour_utc,
-                COUNT(*) as trades,
-                ROUND(SUM(pnl), 2) as total_pnl,
+            SELECT CAST(SUBSTR(ts, 12, 2) AS INTEGER) as hour_utc,
+                COUNT(*) as trades, ROUND(SUM(pnl), 2) as total_pnl,
                 ROUND(AVG(pnl), 2) as avg_pnl
-            FROM trades
-            WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
-            GROUP BY hour_utc
-            ORDER BY hour_utc
-        """)
+            FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
+            GROUP BY hour_utc ORDER BY hour_utc""")
         return [dict(r) for r in cur.fetchall()]
