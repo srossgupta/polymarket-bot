@@ -47,20 +47,36 @@ def is_crypto_market(market: Market) -> bool:
 def select_markets_for_next_24h(
     markets: list[Market], cfg: BotConfig, now: datetime | None = None,
 ) -> list[Market]:
+    import logging
+    log = logging.getLogger(__name__)
     now_utc = now or datetime.now(timezone.utc)
     horizon = now_utc + timedelta(hours=cfg.strategy.max_scan_horizon_hours)
     pref = {c.lower() for c in cfg.preferred_categories} if cfg.preferred_categories else set()
     selected = []
+    drop_inactive = drop_crypto = drop_pref = drop_time = drop_past = drop_future = 0
     for market in markets:
         if not market.active:
+            drop_inactive += 1
             continue
         if is_crypto_market(market):
+            drop_crypto += 1
             continue
         if pref and market.category.lower() not in pref:
+            drop_pref += 1
             continue
         if not (now_utc < market.end_time <= horizon):
+            drop_time += 1
+            if market.end_time <= now_utc:
+                drop_past += 1
+            else:
+                drop_future += 1
             continue
         selected.append(market)
+    log.info(
+        "select filter: %d in → %d out (dropped: %d inactive, %d crypto, %d pref, %d time [%d past, %d future])",
+        len(markets), len(selected), drop_inactive, drop_crypto, drop_pref,
+        drop_time, drop_past, drop_future,
+    )
     return sorted(selected, key=lambda m: m.end_time)
 
 

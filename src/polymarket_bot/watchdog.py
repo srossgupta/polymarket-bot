@@ -21,7 +21,7 @@ import logging
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from typing import Any
 
@@ -228,7 +228,7 @@ def _run_one_cycle_with_watchdog_check(cfg, watchdog: LiveWatchdog, shutdown: Ev
     """
     from polymarket_bot.api import PolymarketClient
     from polymarket_bot.engine import _monitor_market_cluster, scan_watchlist
-    from polymarket_bot.trading import PaperPortfolio, should_wake_for_market
+    from polymarket_bot.trading import PaperPortfolio, eligible_for_tracking, should_wake_for_market
     from polymarket_bot.data.storage import append_metrics
 
     client    = PolymarketClient(cfg)
@@ -236,7 +236,8 @@ def _run_one_cycle_with_watchdog_check(cfg, watchdog: LiveWatchdog, shutdown: Ev
     now       = datetime.now(timezone.utc)
 
     watchlist = scan_watchlist(client, cfg, now=now)
-    pending   = [m for m in watchlist if m.end_time > now]
+    pending   = [m for m in watchlist if m.end_time > now and eligible_for_tracking(m, cfg)]
+    logger.info("📋 %d markets pass volume floor — these are the live candidates", len(pending))
     run_stats: list[dict] = []
 
     while pending and not shutdown.is_set():

@@ -77,6 +77,12 @@ class PolymarketClient:
     @staticmethod
     def _get_token_ids(raw: dict[str, Any]) -> tuple[str, str]:
         clob_ids = raw.get("clobTokenIds") or []
+        if isinstance(clob_ids, str):
+            try:
+                import json
+                clob_ids = json.loads(clob_ids)
+            except (ValueError, TypeError):
+                clob_ids = []
         if isinstance(clob_ids, list) and len(clob_ids) >= 2:
             return str(clob_ids[0]), str(clob_ids[1])
         tokens = raw.get("tokens") or []
@@ -145,6 +151,11 @@ class PolymarketClient:
 
     def fetch_open_markets(self) -> list[Market]:
         all_markets: list[Market] = []
+        total_rows = 0
+        drop_no_endtime = 0
+        drop_no_tokens = 0
+        drop_no_id = 0
+        sample_raw: dict[str, Any] | None = None
         offset = 0
         page_size = 500
         while True:
@@ -159,13 +170,34 @@ class PolymarketClient:
             if not rows:
                 break
             for raw in rows:
+                total_rows += 1
+                if sample_raw is None:
+                    sample_raw = raw
+                # Inline diagnostic parse
+                try:
+                    self._parse_end_time(raw)
+                except (ValueError, KeyError):
+                    drop_no_endtime += 1
+                    continue
+                yes_id, no_id = self._get_token_ids(raw)
+                if not yes_id or not no_id:
+                    drop_no_tokens += 1
+                    continue
+                if not (raw.get("id") or raw.get("conditionId")):
+                    drop_no_id += 1
+                    continue
                 market = self._parse_market(raw)
                 if market:
                     all_markets.append(market)
             if len(rows) < page_size:
                 break
             offset += page_size
-        logger.info("Fetched %d open markets total", len(all_markets))
+        logger.info(
+            "Fetched %d rows → %d parsed (dropped: %d no_endtime, %d no_tokens, %d no_id)",
+            total_rows, len(all_markets), drop_no_endtime, drop_no_tokens, drop_no_id,
+        )
+        if total_rows > 0 and not all_markets and sample_raw is not None:
+            logger.info("Sample raw market keys: %s", sorted(sample_raw.keys()))
         return all_markets
 
     def fetch_price(self, token_id: str) -> float:
