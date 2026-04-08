@@ -34,6 +34,7 @@ Examples:
   python -m polymarket_bot --sweep             # Parameter sweep optimization
   python -m polymarket_bot --paper-once        # Run one daily cycle
   python -m polymarket_bot --run-loop          # Run forever on schedule
+  python -m polymarket_bot --watchdog          # Run forever with live self-correction
   python -m polymarket_bot --pnl              # Full P&L report
   python -m polymarket_bot --categories        # Category ranking
   python -m polymarket_bot --whatif --entry 93 --stop 65  # What-if analysis
@@ -49,6 +50,7 @@ Examples:
     group.add_argument("--sensitivity", action="store_true")
     group.add_argument("--whatif", action="store_true")
     group.add_argument("--equity", action="store_true")
+    group.add_argument("--watchdog", action="store_true")
     parser.add_argument("--entry", type=float)
     parser.add_argument("--stop", type=float)
     parser.add_argument("--wake", type=int)
@@ -84,6 +86,9 @@ Examples:
         _print_json(what_if_analysis(args.entry, args.stop, args.wake))
     elif args.equity:
         _print_json(equity_curve())
+    elif args.watchdog:
+        from polymarket_bot.watchdog import run_with_watchdog
+        run_with_watchdog()
     else:
         parser.print_help()
 
