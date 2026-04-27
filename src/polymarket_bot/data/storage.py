@@ -1,4 +1,4 @@
-"""SQLite-backed storage for trades, snapshots, watchlists, and metrics."""
+"""SQLite storage for trades, snapshots, watchlists, and metrics."""
 
 from __future__ import annotations
 
@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     volume_usd REAL,
     category TEXT,
     yes_token_id TEXT,
-    no_token_id TEXT
+    no_token_id TEXT,
+    UNIQUE(scan_ts, market_id)
 );
 
 CREATE TABLE IF NOT EXISTS metrics (
@@ -88,7 +89,6 @@ CREATE TABLE IF NOT EXISTS performance (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
-CREATE INDEX IF NOT EXISTS idx_trades_category ON trades(category);
 CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
 CREATE INDEX IF NOT EXISTS idx_snapshots_market ON snapshots(market_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts);
@@ -119,25 +119,19 @@ def init_db() -> None:
     _get_conn()
 
 
+# --- Trades ---
+
 def append_trade(event: TradeEvent) -> None:
     with _cursor() as cur:
         cur.execute(
             """INSERT INTO trades (market_id, question, category, side, event_type, ts,
                price, size_dollars, shares, pnl, reason, entry_price,
-               hold_duration_seconds, peak_price, volume_at_entry,
-               velocity_at_entry, volatility_at_entry)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               hold_duration_seconds, volume_at_entry)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (event.market_id, event.question, event.category, event.side,
              event.event_type, event.ts.isoformat(), event.price, event.size_dollars,
              event.shares, event.pnl, event.reason, event.entry_price,
-             event.hold_duration_seconds, event.peak_price, event.volume_at_entry,
-             event.velocity_at_entry, event.volatility_at_entry))
-
-
-def load_trade_events(limit: int = 5000) -> list[dict[str, Any]]:
-    with _cursor() as cur:
-        cur.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,))
-        return [dict(row) for row in cur.fetchall()]
+             event.hold_duration_seconds, event.volume_at_entry))
 
 
 def load_closed_trades(limit: int = 5000) -> list[dict[str, Any]]:
@@ -148,17 +142,7 @@ def load_closed_trades(limit: int = 5000) -> list[dict[str, Any]]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def load_trades_by_category() -> dict[str, list[dict]]:
-    with _cursor() as cur:
-        cur.execute(
-            "SELECT * FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE') "
-            "ORDER BY category, ts")
-        rows = [dict(r) for r in cur.fetchall()]
-    result: dict[str, list[dict]] = {}
-    for r in rows:
-        result.setdefault(r["category"], []).append(r)
-    return result
-
+# --- Snapshots ---
 
 def append_snapshot(market: Market, point: PricePoint) -> None:
     with _cursor() as cur:
@@ -180,17 +164,21 @@ def load_snapshots(market_id: str | None = None, limit: int = 50000) -> list[dic
         return [dict(r) for r in cur.fetchall()]
 
 
+# --- Watchlist ---
+
 def save_watchlist(markets: list[Market], scan_ts: datetime | None = None) -> None:
     ts = (scan_ts or datetime.now(timezone.utc)).isoformat()
     with _cursor() as cur:
         for m in markets:
             cur.execute(
-                """INSERT INTO watchlist (scan_ts, market_id, question, end_time,
+                """INSERT OR IGNORE INTO watchlist (scan_ts, market_id, question, end_time,
                    volume_usd, category, yes_token_id, no_token_id)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 (ts, m.market_id, m.question, m.end_time.isoformat(),
                  m.volume_usd, m.category, m.yes_token_id, m.no_token_id))
 
+
+# --- Metrics ---
 
 def append_metrics(metrics: dict) -> None:
     with _cursor() as cur:
@@ -203,6 +191,8 @@ def load_metrics(limit: int = 500) -> list[dict]:
         cur.execute("SELECT ts, payload FROM metrics ORDER BY ts DESC LIMIT ?", (limit,))
         return [{"ts": r["ts"], **json.loads(r["payload"])} for r in cur.fetchall()]
 
+
+# --- Performance ---
 
 def save_performance(snap: PerformanceSnapshot) -> None:
     with _cursor() as cur:
@@ -224,13 +214,14 @@ def load_performance_history(limit: int = 200) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+# --- Analytics queries ---
+
 def get_pnl_by_parameter_set() -> list[dict]:
     with _cursor() as cur:
         cur.execute("""
             SELECT ROUND(entry_price * 100) as entry_cents, COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl,
-                ROUND(AVG(hold_duration_seconds), 1) as avg_hold_secs
+                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl
             FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
             GROUP BY ROUND(entry_price * 100) ORDER BY entry_cents""")
         return [dict(r) for r in cur.fetchall()]
@@ -241,9 +232,7 @@ def get_category_performance() -> list[dict]:
         cur.execute("""
             SELECT category, COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl,
-                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl END), 2) as avg_win,
-                ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END), 2) as avg_loss
+                ROUND(SUM(pnl), 2) as total_pnl, ROUND(AVG(pnl), 2) as avg_pnl
             FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
             GROUP BY category ORDER BY total_pnl DESC""")
         return [dict(r) for r in cur.fetchall()]
@@ -253,8 +242,7 @@ def get_hourly_pnl() -> list[dict]:
     with _cursor() as cur:
         cur.execute("""
             SELECT CAST(SUBSTR(ts, 12, 2) AS INTEGER) as hour_utc,
-                COUNT(*) as trades, ROUND(SUM(pnl), 2) as total_pnl,
-                ROUND(AVG(pnl), 2) as avg_pnl
+                COUNT(*) as trades, ROUND(SUM(pnl), 2) as total_pnl
             FROM trades WHERE event_type IN ('SELL_MARKET','STOP_LOSS','FORCED_CLOSE')
             GROUP BY hour_utc ORDER BY hour_utc""")
         return [dict(r) for r in cur.fetchall()]

@@ -1,4 +1,7 @@
-"""Configuration with validation, parameter bounds, and adaptive state persistence."""
+"""Configuration with adaptive state persistence.
+
+All the knobs the bot uses, loaded from adaptive_state.json.
+"""
 
 from __future__ import annotations
 
@@ -25,23 +28,20 @@ class StrategyParams:
     max_scan_horizon_hours: int = 24
 
     # Wake / monitoring
-    wake_minutes_before_close: int = 6
-    poll_seconds: float = 1.0  # fast polling for real-time
+    wake_minutes_before_close: int = 5
+    poll_seconds: float = 0.3
     min_time_to_close_seconds: int = 15
 
     # Volume filter
-    min_volume_usd: float = 100_000.0
+    min_volume_usd: float = 5_000.0
 
-    # Entry
+    # Entry band: enter if price is between entry_threshold_cents and 99.5¢
     entry_threshold_cents: float = 95.0
 
-    # Stop loss
-    stop_loss_cents: float = 70.0
-
     # Position sizing
-    max_dollars_per_market: float = 100.0
+    max_dollars_per_market: float = 50.0
 
-    # Crypto exclusion keywords
+    # Markets to skip (matched against question/category/slug)
     disallowed_category_keywords: list[str] = field(
         default_factory=lambda: [
             "crypto", "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
@@ -50,26 +50,14 @@ class StrategyParams:
         ]
     )
 
-    def validate(self, bounds: ParamBounds) -> None:
-        self.entry_threshold_cents = max(bounds.min_entry_cents,
-                                         min(bounds.max_entry_cents, self.entry_threshold_cents))
-        self.stop_loss_cents = max(bounds.min_stop_cents,
-                                  min(bounds.max_stop_cents, self.stop_loss_cents))
-        self.wake_minutes_before_close = max(bounds.min_wake_minutes,
-                                             min(bounds.max_wake_minutes, self.wake_minutes_before_close))
-
 
 @dataclass
 class ParamBounds:
-    """Hard limits for self-correction parameter changes."""
+    """Hard limits for self-correction changes."""
     min_entry_cents: float = 90.0
-    max_entry_cents: float = 98.0
-    min_stop_cents: float = 55.0
-    max_stop_cents: float = 85.0
+    max_entry_cents: float = 97.0
     min_wake_minutes: int = 3
-    max_wake_minutes: int = 15
-    min_poll_seconds: float = 0.5
-    max_poll_seconds: float = 5.0
+    max_wake_minutes: int = 10
 
 
 @dataclass
@@ -81,9 +69,7 @@ class AdaptationConfig:
     step_cents: float = 1.0
     min_category_samples: int = 5
     max_preferred_categories: int = 6
-    # Exponential decay for weighting recent trades higher
     decay_factor: float = 0.95
-    # Confidence: only adapt if we have enough data for statistical significance
     min_confidence_level: float = 0.6
 
 
@@ -118,7 +104,7 @@ def _overlay_dict(obj: Any, overrides: dict[str, Any]) -> None:
 
 
 def load_config() -> BotConfig:
-    """Load base config, then overlay adaptive state if available."""
+    """Load base config, then overlay adaptive state from disk."""
     cfg = BotConfig()
 
     if os.path.exists(ADAPTIVE_STATE_FILE):
@@ -127,7 +113,13 @@ def load_config() -> BotConfig:
                 state = json.load(f)
             _overlay_dict(cfg.strategy, state.get("strategy", {}))
             cfg.preferred_categories = state.get("preferred_categories", [])
-            cfg.strategy.validate(cfg.bounds)
+            # Clamp to bounds
+            cfg.strategy.entry_threshold_cents = max(
+                cfg.bounds.min_entry_cents,
+                min(cfg.bounds.max_entry_cents, cfg.strategy.entry_threshold_cents))
+            cfg.strategy.wake_minutes_before_close = max(
+                cfg.bounds.min_wake_minutes,
+                min(cfg.bounds.max_wake_minutes, cfg.strategy.wake_minutes_before_close))
         except (OSError, json.JSONDecodeError):
             pass
 

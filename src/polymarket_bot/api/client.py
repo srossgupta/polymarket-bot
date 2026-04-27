@@ -1,7 +1,8 @@
-"""Polymarket API client with resilient parsing, pagination, and rate limiting."""
+"""Polymarket API client: fetch markets and prices."""
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -15,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """Simple token-bucket rate limiter."""
-
     def __init__(self, calls_per_second: float = 5.0):
         self._min_interval = 1.0 / calls_per_second
         self._last_call = 0.0
@@ -48,9 +47,7 @@ class PolymarketClient:
                 return resp.json()
             except requests.exceptions.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 429:
-                    wait = 2.0 * (attempt + 1)
-                    logger.warning("Rate limited, backing off %.1fs", wait)
-                    time.sleep(wait)
+                    time.sleep(2.0 * (attempt + 1))
                     last_error = exc
                     continue
                 last_error = exc
@@ -72,19 +69,20 @@ class PolymarketClient:
                     return datetime.fromisoformat(val.replace("Z", "+00:00"))
                 except ValueError:
                     continue
-        raise ValueError("Market has no parseable end time")
+        raise ValueError("No parseable end time")
 
     @staticmethod
     def _get_token_ids(raw: dict[str, Any]) -> tuple[str, str]:
+        """Extract YES/NO token IDs. clobTokenIds comes as a JSON string, not a list."""
         clob_ids = raw.get("clobTokenIds") or []
         if isinstance(clob_ids, str):
             try:
-                import json
                 clob_ids = json.loads(clob_ids)
             except (ValueError, TypeError):
                 clob_ids = []
         if isinstance(clob_ids, list) and len(clob_ids) >= 2:
             return str(clob_ids[0]), str(clob_ids[1])
+        # Fallback: look in tokens array
         tokens = raw.get("tokens") or []
         yes_id, no_id = "", ""
         for token in tokens:
@@ -102,8 +100,8 @@ class PolymarketClient:
         except (ValueError, KeyError):
             return None
 
-        yes_token_id, no_token_id = self._get_token_ids(raw)
-        if not yes_token_id or not no_token_id:
+        yes_id, no_id = self._get_token_ids(raw)
+        if not yes_id or not no_id:
             return None
 
         market_id = str(raw.get("id") or raw.get("conditionId") or "")
@@ -111,20 +109,8 @@ class PolymarketClient:
             return None
 
         volume = float(raw.get("volumeNum") or raw.get("volume") or 0)
-        volume_24h = float(raw.get("volume24hr") or 0)
 
-        outcome_prices = raw.get("outcomePrices") or []
-        best_bid = 0.0
-        best_ask = 0.0
-        if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
-            try:
-                best_bid = float(outcome_prices[0])
-                best_ask = float(outcome_prices[1])
-            except (ValueError, TypeError):
-                pass
-
-        spread = float(raw.get("spread") or 0)
-
+        # Category from events array or slug
         category = "uncategorized"
         events = raw.get("events") or []
         if events and isinstance(events, list):
@@ -138,26 +124,19 @@ class PolymarketClient:
             end_time=end_time,
             volume_usd=volume,
             category=category.lower(),
-            yes_token_id=yes_token_id,
-            no_token_id=no_token_id,
+            yes_token_id=yes_id,
+            no_token_id=no_id,
             active=bool(raw.get("active", True)),
             slug=str(raw.get("slug") or ""),
-            volume_24h=volume_24h,
-            best_bid=best_bid,
-            best_ask=best_ask,
-            spread=spread,
-            neg_risk=bool(raw.get("negRisk", False)),
         )
 
     def fetch_open_markets(self) -> list[Market]:
+        """Paginate through Gamma API, parse all open markets."""
         all_markets: list[Market] = []
         total_rows = 0
-        drop_no_endtime = 0
-        drop_no_tokens = 0
-        drop_no_id = 0
-        sample_raw: dict[str, Any] | None = None
         offset = 0
         page_size = 500
+
         while True:
             params = {"closed": "false", "active": "true",
                       "limit": str(page_size), "offset": str(offset)}
@@ -166,38 +145,22 @@ class PolymarketClient:
             except Exception as exc:
                 logger.error("Failed to fetch markets at offset %d: %s", offset, exc)
                 break
+
             rows = payload if isinstance(payload, list) else payload.get("data", [])
             if not rows:
                 break
+
             for raw in rows:
                 total_rows += 1
-                if sample_raw is None:
-                    sample_raw = raw
-                # Inline diagnostic parse
-                try:
-                    self._parse_end_time(raw)
-                except (ValueError, KeyError):
-                    drop_no_endtime += 1
-                    continue
-                yes_id, no_id = self._get_token_ids(raw)
-                if not yes_id or not no_id:
-                    drop_no_tokens += 1
-                    continue
-                if not (raw.get("id") or raw.get("conditionId")):
-                    drop_no_id += 1
-                    continue
                 market = self._parse_market(raw)
                 if market:
                     all_markets.append(market)
+
             if len(rows) < page_size:
                 break
             offset += page_size
-        logger.info(
-            "Fetched %d rows → %d parsed (dropped: %d no_endtime, %d no_tokens, %d no_id)",
-            total_rows, len(all_markets), drop_no_endtime, drop_no_tokens, drop_no_id,
-        )
-        if total_rows > 0 and not all_markets and sample_raw is not None:
-            logger.info("Sample raw market keys: %s", sorted(sample_raw.keys()))
+
+        logger.info("Fetched %d rows → %d parsed markets", total_rows, len(all_markets))
         return all_markets
 
     def fetch_price(self, token_id: str) -> float:
@@ -206,8 +169,7 @@ class PolymarketClient:
                                 params={"token_id": token_id})
             mid = payload.get("mid") if isinstance(payload, dict) else payload
             return float(mid)
-        except Exception as exc:
-            logger.warning("Price fetch failed for %s: %s", token_id, exc)
+        except Exception:
             return 0.0
 
     def fetch_market_prices(self, market: Market) -> PricePoint:
@@ -217,12 +179,3 @@ class PolymarketClient:
         spread = abs(yes_price + no_price - 1.0) if (yes_price and no_price) else 0.0
         return PricePoint(ts=ts, yes=yes_price, no=no_price, spread=spread,
                           volume_at_snapshot=market.volume_usd)
-
-    def fetch_orderbook(self, token_id: str) -> dict[str, Any]:
-        try:
-            payload = self._get(f"{self.cfg.clob_base_url}/book",
-                                params={"token_id": token_id})
-            return payload if isinstance(payload, dict) else {}
-        except Exception as exc:
-            logger.warning("Orderbook fetch failed for %s: %s", token_id, exc)
-            return {}

@@ -15,8 +15,6 @@ class Side(str, Enum):
 
 class TradeType(str, Enum):
     BUY_LIMIT = "BUY_LIMIT"
-    SELL_MARKET = "SELL_MARKET"
-    STOP_LOSS = "STOP_LOSS"
     FORCED_CLOSE = "FORCED_CLOSE"
 
 
@@ -31,11 +29,6 @@ class Market:
     no_token_id: str
     active: bool = True
     slug: str = ""
-    volume_24h: float = 0.0
-    best_bid: float = 0.0
-    best_ask: float = 0.0
-    spread: float = 0.0
-    neg_risk: bool = False
 
     @property
     def seconds_to_close(self) -> float:
@@ -54,14 +47,6 @@ class PricePoint:
     spread: float = 0.0
     volume_at_snapshot: float = 0.0
 
-    @property
-    def dominant_side(self) -> Side:
-        return Side.YES if self.yes >= self.no else Side.NO
-
-    @property
-    def dominant_price(self) -> float:
-        return max(self.yes, self.no)
-
 
 @dataclass
 class PriceSeries:
@@ -75,46 +60,6 @@ class PriceSeries:
         if len(self.points) > self.max_points:
             self.points = self.points[-self.max_points:]
 
-    @property
-    def latest(self) -> PricePoint | None:
-        return self.points[-1] if self.points else None
-
-    def prices(self, side: Side) -> list[float]:
-        return [p.yes if side == Side.YES else p.no for p in self.points]
-
-    def velocity(self, side: Side, window: int = 5) -> float:
-        """Price change per second over the last `window` observations."""
-        px = self.prices(side)
-        if len(px) < 2 or len(self.points) < 2:
-            return 0.0
-        n = min(window, len(self.points))
-        recent = px[-n:]
-        dt = (self.points[-1].ts - self.points[-n].ts).total_seconds()
-        if dt <= 0:
-            return 0.0
-        return (recent[-1] - recent[0]) / dt
-
-    def volatility(self, side: Side, window: int = 20) -> float:
-        """Standard deviation of returns over last `window` observations."""
-        px = self.prices(side)
-        if len(px) < 3:
-            return 0.0
-        recent = px[-window:]
-        returns = [(recent[i] - recent[i - 1]) / max(recent[i - 1], 1e-6)
-                   for i in range(1, len(recent))]
-        if not returns:
-            return 0.0
-        mean = sum(returns) / len(returns)
-        var = sum((r - mean) ** 2 for r in returns) / len(returns)
-        return var ** 0.5
-
-    def mean_price(self, side: Side, window: int = 10) -> float:
-        px = self.prices(side)
-        if not px:
-            return 0.0
-        recent = px[-window:]
-        return sum(recent) / len(recent)
-
 
 @dataclass
 class Position:
@@ -126,23 +71,6 @@ class Position:
     entry_price: float
     size_dollars: float
     shares: float
-    stop_loss_price: float
-    peak_price: float = 0.0
-    ticks_held: int = 0
-
-    def __post_init__(self):
-        if self.peak_price == 0.0:
-            self.peak_price = self.entry_price
-
-    @property
-    def unrealized_pnl_at(self) -> float:
-        """P&L if closed at peak price."""
-        return self.shares * self.peak_price - self.size_dollars
-
-    def update_peak(self, current_price: float) -> None:
-        self.ticks_held += 1
-        if current_price > self.peak_price:
-            self.peak_price = current_price
 
 
 @dataclass
@@ -160,10 +88,7 @@ class TradeEvent:
     reason: str = ""
     entry_price: float = 0.0
     hold_duration_seconds: float = 0.0
-    peak_price: float = 0.0
     volume_at_entry: float = 0.0
-    velocity_at_entry: float = 0.0
-    volatility_at_entry: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -180,7 +105,6 @@ class TradeEvent:
 
 @dataclass
 class PerformanceSnapshot:
-    """Point-in-time portfolio performance."""
     ts: datetime
     cash: float
     positions_value: float
