@@ -33,6 +33,9 @@ class PolymarketClient:
         self.cfg = cfg
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
+        # Increase connection pool to support parallel pre-screening (10 workers)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        self.session.mount("https://", adapter)
         self._rate = RateLimiter(calls_per_second=4.0)
 
     def _get(self, url: str, params: dict[str, Any] | None = None,

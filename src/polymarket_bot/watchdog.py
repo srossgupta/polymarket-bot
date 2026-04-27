@@ -21,10 +21,10 @@ from polymarket_bot.trading.adaptive import adapt_strategy
 
 logger = logging.getLogger("watchdog")
 
-WATCH_INTERVAL = 30       # seconds between checks
-MIN_TRADES     = 5        # need this many before judging
-DANGER_WIN_RATE = 0.40    # below this = pull in
-COLD_STREAK     = 3       # this many losses in a row = pause
+WATCH_INTERVAL = 15       # seconds between checks (faster feedback)
+MIN_TRADES     = 3        # need this many before judging (react sooner)
+DANGER_WIN_RATE = 0.35    # below this = pull in (slightly more tolerant)
+COLD_STREAK     = 2       # this many losses in a row = pause (react faster)
 
 
 class LiveWatchdog:
@@ -80,7 +80,7 @@ class LiveWatchdog:
         logger.info("[check %d] win_rate=%.0f%% pnl=$%.2f streak_bad=%s",
                     self.checks_done, win_rate * 100, total_pnl, all_losses)
 
-        if len(decisive) < 3:
+        if len(decisive) < 2:
             return
 
         if win_rate < DANGER_WIN_RATE:
@@ -143,8 +143,8 @@ def run_with_watchdog() -> None:
             time.sleep(5)
             continue
 
-        logger.info("Cycle %d done. Next cycle in 60s.", cycle)
-        _interruptible_sleep(60, shutdown)
+        logger.info("Cycle %d done. Starting next cycle immediately.", cycle)
+        _interruptible_sleep(5, shutdown)  # tiny pause then rescan
 
     watchdog.stop()
     logger.info("Bot shut down after %d cycles.", cycle)
@@ -152,6 +152,7 @@ def run_with_watchdog() -> None:
 
 def _run_one_cycle(cfg, watchdog: LiveWatchdog, shutdown: Event) -> None:
     """Scan → monitor → close. Checks watchdog/shutdown between markets."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from polymarket_bot.api import PolymarketClient
     from polymarket_bot.engine import _monitor_market_cluster, scan_watchlist
     from polymarket_bot.trading import PaperPortfolio, eligible_for_tracking, should_wake_for_market
@@ -164,24 +165,34 @@ def _run_one_cycle(cfg, watchdog: LiveWatchdog, shutdown: Event) -> None:
     watchlist = scan_watchlist(client, cfg, now=now)
 
     # Pre-filter: skip already-resolved and zero-price markets
-    pending: list = []
-    for m in watchlist:
-        if m.end_time <= now or not eligible_for_tracking(m, cfg):
-            continue
+    # Run in parallel — fetching 2500+ markets serially takes 15+ minutes
+    candidates = [m for m in watchlist
+                  if m.end_time > now and eligible_for_tracking(m, cfg)]
+
+    def _check_price(m):
         try:
             pt = client.fetch_market_prices(m)
             best = max(pt.yes, pt.no)
             if best >= 0.99:
-                logger.info("SKIP %s: near-resolved (%.2f)", m.question[:50], best)
-                continue
+                return None, f"near-resolved ({best:.2f})"
             if best <= 0.01:
-                logger.info("SKIP %s: near-zero (%.2f)", m.question[:50], best)
-                continue
+                return None, f"near-zero ({best:.2f})"
+            return m, None
         except Exception:
-            pass
-        pending.append(m)
+            return m, None  # can't fetch — let monitoring handle it
 
-    logger.info("%d markets pass filters", len(pending))
+    pending: list = []
+    skipped_pre = 0
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(_check_price, m): m for m in candidates}
+        for future in as_completed(futures):
+            market, _ = future.result()
+            if market is None:
+                skipped_pre += 1
+            else:
+                pending.append(market)
+
+    logger.info("%d markets pass filters (%d pre-screened out)", len(pending), skipped_pre)
     run_stats: list[dict] = []
 
     while pending and not shutdown.is_set():
